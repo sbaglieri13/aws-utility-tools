@@ -1,0 +1,7 @@
+.venv/
+export/
+__pycache__/
+*.csv
+.env
+credentials
+*.pem
