@@ -50,6 +50,10 @@ PTYPE=$(arrow_select user role)
 
 read -rp "How many principals? (ENTER for default - 1): " N
 N="${N:-1}"
+if ! [[ "$N" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Invalid number of principals: '$N' (must be a positive integer)." >&2
+    exit 1
+fi
 
 ARGS=(--type "$PTYPE")
 for i in $(seq 1 "$N"); do

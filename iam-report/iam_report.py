@@ -7,7 +7,7 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, ProfileNotFound
 
 PERM_FIELDS = ["Subject", "SubjectType", "Source", "Policy", "PolicyVersion", "ARN", "Sid", "Effect", "Action", "Resource", "Principal", "Condition"]
-PROFILE_FIELDS = ["Subject", "SubjectType", "ARN", "Path", "Created", "Tags", "RoleLastUsed", "Groups", "ConsoleAccess", "MFAActive", "AccessKeys"]
+PROFILE_FIELDS = ["Subject", "SubjectType", "ARN", "Path", "Created", "Tags", "RoleLastUsed", "Groups", "ConsoleAccess", "MFAActive", "AccessKeys", "TrustedBy"]
 
 
 def name_from_arn(value):
@@ -117,8 +117,12 @@ def collect(iam, ptype, name):
         console, mfa, keys = fetch_user_security(iam, name)
 
     trust = None
+    trusted_by = ""
     if ptype == "role" and meta.get("AssumeRolePolicyDocument"):
         trust = meta["AssumeRolePolicyDocument"]
+        principals = [json.dumps(stmt["Principal"]) for stmt in trust.get("Statement", [])
+                      if stmt.get("Effect") == "Allow" and "Principal" in stmt]
+        trusted_by = "; ".join(dict.fromkeys(principals))
 
     return {
         "type": ptype,
@@ -133,6 +137,7 @@ def collect(iam, ptype, name):
         "mfa": mfa,
         "keys": keys,
         "trust": trust,
+        "trusted_by": trusted_by,
         "blocks": blocks,
     }
 
@@ -173,23 +178,41 @@ def profile_row(data):
         "ConsoleAccess": data["console"] if data["type"] == "user" else "",
         "MFAActive": data["mfa"] if data["type"] == "user" else "",
         "AccessKeys": "; ".join(data["keys"]),
+        "TrustedBy": data["trusted_by"],
     }
 
 
 def matrix_rows(all_perm_rows):
-    by_subject = {}
+    subjects = []
+    resources_by_key = {}
+    denied_keys = set()
     for row in all_perm_rows:
-        if row["Source"] == "TrustPolicy" or row["Effect"] != "Allow":
+        if row["Source"] == "TrustPolicy":
             continue
-        by_subject.setdefault(row["Subject"], set()).add(row["Action"])
-    subjects = list(by_subject.keys())
-    union = sorted(set().union(*by_subject.values()) if by_subject else set(),
-                    key=lambda a: (a.split(":")[0], a))
+        subject = row["Subject"]
+        if subject not in subjects:
+            subjects.append(subject)
+        key = (subject, row["Action"])
+        if row["Effect"] == "Allow":
+            resources_by_key.setdefault(key, set()).update(r for r in row["Resource"].split("; ") if r)
+        elif row["Effect"] == "Deny":
+            denied_keys.add(key)
+
+    union = sorted({action for _, action in resources_by_key}, key=lambda a: (a.split(":")[0], a))
     rows = []
     for action in union:
         row = {"Permission": action}
         for s in subjects:
-            row[s] = "X" if action in by_subject[s] else ""
+            key = (s, action)
+            resources = resources_by_key.get(key)
+            if not resources:
+                row[s] = ""
+            elif "*" in resources:
+                row[s] = "X*"
+            else:
+                row[s] = "X"
+            if row[s] and key in denied_keys:
+                row[s] += "!"
         rows.append(row)
     return subjects, rows
 
@@ -233,7 +256,7 @@ def main():
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    base = args.output or f"iam_{args.type}_" + "_".join(names)
+    base = args.output or f"iam_{args.type}"
 
     all_perm_rows = []
     profile_rows = []
